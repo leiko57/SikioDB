@@ -1,0 +1,66 @@
+[package]
+name = "sikiodb"
+version = "0.1.0"
+edition = "2021"
+authors = ["seiko1337"]
+description = "A blazing-fast, local-first database for the web. Up to 2.5x - 3x faster than IndexedDB. Built with Rust, WebAssembly, and OPFS."
+license = "AGPL-3.0-only"
+repository = "https://github.com/seiko1337/SikioDB"
+keywords = ["database", "wasm", "opfs", "key-value", "storage"]
+categories = ["database", "wasm"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["console_error_panic_hook"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+rkyv = { version = "0.8", features = ["bytecheck"] }
+getrandom = { version = "0.2", features = ["js"] }
+crc32fast = "1.3"
+lz4_flex = "0.11"
+lru = "0.16.2"
+console_error_panic_hook = { version = "0.1", optional = true }
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+    "console",
+    "Window",
+    "WorkerGlobalScope",
+    "Navigator",
+    "StorageManager",
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemSyncAccessHandle",
+    "FileSystemGetFileOptions",
+    "FileSystemGetDirectoryOptions",
+    "FileSystemCreateWritableOptions",
+    "FileSystemReadWriteOptions",
+]
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[profile.release]
+opt-level = 'z'
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ['-Oz', '--enable-bulk-memory', '--enable-nontrapping-float-to-int']
+
+[package.metadata.wasm-pack.profile.release.wasm-bindgen]
+debug-js-glue = false
+demangle-name-section = false
+dwarf-debug-info = false
