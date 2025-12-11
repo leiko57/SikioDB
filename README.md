@@ -1,5 +1,7 @@
 # SikioDB
 
+![NPM Version](https://img.shields.io/npm/v/sikiodb?style=flat-square&color=blue) ![License](https://img.shields.io/github/license/seiko1337/SikioDB?style=flat-square) ![Rust](https://img.shields.io/badge/built_with-Rust-orange?style=flat-square) ![WASM](https://img.shields.io/badge/target-WASM-purple?style=flat-square) ![Size](https://img.shields.io/bundlephobia/minzip/sikiodb?style=flat-square&label=minzipped)
+
 A blazing-fast, local-first database for the web. Built with Rust, WebAssembly, and OPFS.
 
 ## Performance
@@ -49,3 +51,4 @@ wasm-pack build --target web --release
 This project is licensed under AGPLv3.
 
 If you want to use SikioDB in a proprietary (closed-source) commercial project and cannot comply with AGPL requirements, please contact me at **keiko1337@proton.me** for a commercial license.
+
