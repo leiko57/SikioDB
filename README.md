@@ -4,6 +4,7 @@
 
 A blazing-fast, local-first database for the web. Built with Rust, WebAssembly, and OPFS.
 
+
 ## Performance
 
 | Records | IndexedDB | SikioDB | Speedup |
@@ -38,6 +39,39 @@ or
 yarn add sikiodb
 ```
 
+## Quick Start
+
+```javascript
+import { SikioDB } from 'sikiodb';
+
+const db = await SikioDB.open('myapp');
+
+// basic operations
+await db.put('user:1', JSON.stringify({ name: 'Alice', age: 25 }));
+const user = await db.get('user:1');
+await db.delete('user:1');
+
+// transactions (atomic)
+await db.transaction(tx => {
+    tx.put('order:1', 'pending');
+    tx.put('order:2', 'pending');
+    tx.delete('cart:1');
+});
+
+// query api
+const adults = await db.query('users')
+    .where('age', '>=', 18)
+    .orderBy('name', 'asc')
+    .limit(10)
+    .exec();
+
+// real-time subscriptions
+db.subscribe('messages', (event) => {
+    console.log('New data:', event.changes);
+});
+
+await db.close();
+```
 
 ## Building from Source
 
@@ -46,9 +80,14 @@ cargo install wasm-pack
 wasm-pack build --target web --release
 ```
 
+## Contributing
+
+Found a bug or have a feature request? Open an [Issue](https://github.com/seiko1337/SikioDB/issues/new).
+PRs are welcome!
+
 ## License
+
 
 This project is licensed under AGPLv3.
 
 If you want to use SikioDB in a proprietary (closed-source) commercial project and cannot comply with AGPL requirements, please contact me at **keiko1337@proton.me** for a commercial license.
-
