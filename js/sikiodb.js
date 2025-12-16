@@ -33,6 +33,11 @@ export class SikioDB {
                     });
                 } catch (e) {
                     console.warn('OPFS unavailable, falling back to IndexedDB:', e);
+                    if (instance.worker) {
+                        instance.worker.terminate();
+                        instance.worker = null;
+                    }
+                    instance.pendingCalls.clear();
                     instance._fallback = new IndexedDBFallback(name);
                     await instance._fallback.open();
                 }
@@ -92,47 +97,180 @@ export class SikioDB {
             this.worker.postMessage({ id, method, args }, transfer);
         });
     }
+
+    _toFallbackKey(data) {
+        const bytes = this._toArray(data);
+        return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    }
+
+    _wrapRawValue(valueBytes) {
+        const wrapped = new Uint8Array(1 + valueBytes.length);
+        wrapped[0] = 0;
+        wrapped.set(valueBytes, 1);
+        return wrapped;
+    }
+
+    _wrapTtlValue(valueBytes, ttlMs) {
+        const expiry = BigInt(Date.now()) + BigInt(ttlMs);
+        const wrapped = new Uint8Array(1 + 8 + valueBytes.length);
+        wrapped[0] = 1;
+        new DataView(wrapped.buffer, wrapped.byteOffset, wrapped.byteLength).setBigUint64(1, expiry, true);
+        wrapped.set(valueBytes, 9);
+        return wrapped;
+    }
+
+    _unwrapStoredValue(storedBytes) {
+        if (!storedBytes || storedBytes.length === 0) {
+            return null;
+        }
+
+        const valueType = storedBytes[0];
+        if (valueType === 0) {
+            return storedBytes.slice(1);
+        }
+
+        if (valueType === 1) {
+            if (storedBytes.length < 9) {
+                return null;
+            }
+
+            const view = new DataView(storedBytes.buffer, storedBytes.byteOffset, storedBytes.byteLength);
+            const expiry = view.getBigUint64(1, true);
+            if (BigInt(Date.now()) > expiry) {
+                return null;
+            }
+
+            return storedBytes.slice(9);
+        }
+
+        return storedBytes.slice(1);
+    }
+
     async put(key, value) {
-        if (!this._isLeader && !this._fallback) return this._coordinator.proxyRequest('put', { key, value });
+        if (!this._isLeader && !this._fallback) {
+            return this._coordinator.proxyRequest('put', { key, value });
+        }
+
+        if (this._fallback) {
+            const keyIdb = this._toFallbackKey(key);
+            const userBytes = this._toArray(value);
+            const wrapped = this._wrapRawValue(userBytes);
+            await this._fallback.put(keyIdb, wrapped);
+            return;
+        }
+
         const keyArray = this._toArray(key);
         const valueArray = this._toArray(value);
         return this._call('put', { key: keyArray, value: valueArray });
     }
     async putNoSync(key, value) {
-        if (!this._isLeader && !this._fallback) return this._coordinator.proxyRequest('putNoSync', { key, value });
+        if (!this._isLeader && !this._fallback) {
+            return this._coordinator.proxyRequest('putNoSync', { key, value });
+        }
+
+        if (this._fallback) {
+            return this.put(key, value);
+        }
+
         const keyArray = this._toArray(key);
         const valueArray = this._toArray(value);
         return this._call('putNoSync', { key: keyArray, value: valueArray });
     }
     async get(key) {
-        if (!this._isLeader && !this._fallback) return this._coordinator.proxyRequest('get', { key });
+        if (!this._isLeader && !this._fallback) {
+            const result = await this._coordinator.proxyRequest('get', { key });
+            return result ? new Uint8Array(result) : null;
+        }
+
+        if (this._fallback) {
+            const keyIdb = this._toFallbackKey(key);
+            const stored = await this._fallback.get(keyIdb);
+            if (!stored) {
+                return null;
+            }
+            const storedBytes = stored instanceof Uint8Array ? stored : new Uint8Array(stored);
+            return this._unwrapStoredValue(storedBytes);
+        }
+
         const keyArray = this._toArray(key);
         const result = await this._call('get', { key: keyArray });
         return result ? new Uint8Array(result) : null;
     }
     async delete(key) {
-        if (!this._isLeader && !this._fallback) return this._coordinator.proxyRequest('delete', { key });
+        if (!this._isLeader && !this._fallback) {
+            return this._coordinator.proxyRequest('delete', { key });
+        }
+
+        if (this._fallback) {
+            const keyIdb = this._toFallbackKey(key);
+            const existing = await this._fallback.get(keyIdb);
+            if (!existing) {
+                return false;
+            }
+            const storedBytes = existing instanceof Uint8Array ? existing : new Uint8Array(existing);
+            const userValue = this._unwrapStoredValue(storedBytes);
+            await this._fallback.delete(keyIdb);
+            return userValue !== null;
+        }
+
         const keyArray = this._toArray(key);
         return this._call('delete', { key: keyArray });
     }
     async putWithTTL(key, value, ttlMs) {
-        if (!this._isLeader && !this._fallback) return this._coordinator.proxyRequest('putWithTTL', { key, value, ttlMs });
+        if (!this._isLeader && !this._fallback) {
+            return this._coordinator.proxyRequest('putWithTTL', { key, value, ttlMs });
+        }
+
+        if (this._fallback) {
+            const keyIdb = this._toFallbackKey(key);
+            const userBytes = this._toArray(value);
+            const wrapped = this._wrapTtlValue(userBytes, ttlMs);
+            await this._fallback.put(keyIdb, wrapped);
+            return;
+        }
+
         const keyArray = this._toArray(key);
         const valArray = this._toArray(value);
         return this._call('putWithTTL', { key: keyArray, value: valArray, ttl: ttlMs });
     }
     async flush() {
-        if (!this._isLeader && !this._fallback) return this._coordinator.proxyRequest('flush', {});
+        if (!this._isLeader && !this._fallback) {
+            return this._coordinator.proxyRequest('flush', {});
+        }
+
+        if (this._fallback) {
+            return;
+        }
+
         return this._call('flush');
     }
     async putBatch(entries) {
-        if (!this._isLeader && !this._fallback) return this._coordinator.proxyRequest('putBatch', { entries });
+        if (!this._isLeader && !this._fallback) {
+            return this._coordinator.proxyRequest('putBatch', { entries });
+        }
         if (!Array.isArray(entries)) {
             throw new Error('putBatch expects an array of entries');
         }
         if (entries.length === 0) {
             return 0;
         }
+
+        if (this._fallback) {
+            const encoder = new TextEncoder();
+            const converted = entries.map((e) => {
+                if (!e || typeof e.key !== 'string' || typeof e.value !== 'string') {
+                    throw new Error('Each entry must have string key and value properties');
+                }
+                const keyBytes = encoder.encode(e.key);
+                const valueBytes = encoder.encode(e.value);
+                return {
+                    key: this._toFallbackKey(keyBytes),
+                    value: this._wrapRawValue(valueBytes)
+                };
+            });
+            return this._fallback.putBatch(converted);
+        }
+
         const encoder = new TextEncoder();
         const estimatedSize = entries.reduce((acc, e) => {
             const keyLen = typeof e.key === 'string' ? e.key.length * 3 : 0;
@@ -174,11 +312,34 @@ export class SikioDB {
     async scanRange(startKey, endKey, limit = 1000) {
         if (!this._isLeader && !this._fallback) {
             const result = await this._coordinator.proxyRequest('scanRange', { startKey, endKey, limit });
-            return result.map(entry => ({
-                key: new Uint8Array(Object.values(entry.key)),
-                value: new Uint8Array(Object.values(entry.value))
-            }));
+            return result.map(entry => {
+                const keyBytes = entry.key instanceof Uint8Array ? entry.key : new Uint8Array(Object.values(entry.key));
+                const valueBytes = entry.value instanceof Uint8Array ? entry.value : new Uint8Array(Object.values(entry.value));
+                return { key: keyBytes, value: valueBytes };
+            });
         }
+
+        if (this._fallback) {
+            const startKeyIdb = this._toFallbackKey(startKey);
+            const endKeyIdb = this._toFallbackKey(endKey);
+            const rawLimit = Math.min(10000, Math.max(1, limit) * 10);
+            const rawResults = await this._fallback.scanRange(startKeyIdb, endKeyIdb, rawLimit);
+
+            const results = [];
+            for (const { key, value } of rawResults) {
+                const keyBytes = typeof key === 'string' ? new TextEncoder().encode(key) : new Uint8Array(key);
+                const storedBytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+                const userValue = this._unwrapStoredValue(storedBytes);
+                if (userValue) {
+                    results.push({ key: keyBytes, value: userValue });
+                    if (results.length >= limit) {
+                        break;
+                    }
+                }
+            }
+            return results;
+        }
+
         const startArray = this._toArray(startKey);
         const endArray = this._toArray(endKey);
         const results = await this._call('scanRange', {
@@ -195,6 +356,28 @@ export class SikioDB {
         if (!this._isLeader && !this._fallback) {
             const all = await this.scanRange(startKey, endKey, 10000);
             for (const item of all) yield item;
+            return;
+        }
+
+        if (this._fallback) {
+            const endArray = this._toArray(endKey);
+            let currentStart = this._toArray(startKey);
+            while (true) {
+                const batch = await this.scanRange(currentStart, endArray, batchSize + 1);
+                if (batch.length === 0) {
+                    break;
+                }
+                const hasMore = batch.length > batchSize;
+                const toYield = hasMore ? batch.slice(0, batchSize) : batch;
+                for (const entry of toYield) {
+                    yield entry;
+                }
+                if (!hasMore) {
+                    break;
+                }
+                const lastKey = batch[batchSize].key;
+                currentStart = new Uint8Array([...lastKey, 0]);
+            }
             return;
         }
 
@@ -226,7 +409,14 @@ export class SikioDB {
         }
     }
     async verifyIntegrity() {
-        if (!this._isLeader && !this._fallback) return this._coordinator.proxyRequest('verifyIntegrity', {});
+        if (!this._isLeader && !this._fallback) {
+            return this._coordinator.proxyRequest('verifyIntegrity', {});
+        }
+
+        if (this._fallback) {
+            return [];
+        }
+
         return this._call('verifyIntegrity');
     }
     async close() {
@@ -261,20 +451,39 @@ export class SikioDB {
     }
 
     async _executeMethod(method, args) {
-        if (this._fallback) {
-            return this._executeFallbackMethod(method, args);
+        switch (method) {
+            case 'put':
+                return this.put(args.key, args.value);
+            case 'putNoSync':
+                return this.putNoSync(args.key, args.value);
+            case 'get':
+                return this.get(args.key);
+            case 'delete':
+                return this.delete(args.key);
+            case 'putWithTTL':
+                return this.putWithTTL(args.key, args.value, args.ttlMs ?? args.ttl);
+            case 'flush':
+                return this.flush();
+            case 'putBatch':
+                return this.putBatch(args.entries);
+            case 'scanRange':
+                return this.scanRange(args.startKey, args.endKey, args.limit);
+            case 'verifyIntegrity':
+                return this.verifyIntegrity();
+            case 'commitTransaction':
+                return this._commitTransaction(args.ops);
+            case 'setMany':
+                return this.setMany(args.entries);
+            default:
+                if (this._fallback) {
+                    return this._executeFallbackMethod(method, args);
+                }
+                return this._call(method, args);
         }
-        return this._call(method, args);
     }
 
     async _executeFallbackMethod(method, args) {
         switch (method) {
-            case 'put':
-                return this._fallback.put(args.key, args.value);
-            case 'get':
-                return this._fallback.get(args.key);
-            case 'delete':
-                return this._fallback.delete(args.key);
             default:
                 throw new Error(`Fallback does not support method: ${method}`);
         }
@@ -351,9 +560,34 @@ export class SikioDB {
             }
         };
 
-        fn(tx);
+        await fn(tx);
 
         if (ops.length === 0) return true;
+
+        return this._commitTransaction(ops);
+    }
+
+    async _commitTransaction(ops) {
+        if (!this._isLeader && !this._fallback) {
+            await this._coordinator.proxyRequest('commitTransaction', { ops });
+            return true;
+        }
+
+        if (this._fallback) {
+            const idbOps = ops.map((op) => {
+                const keyBytes = new Uint8Array(op.key);
+                const key = this._toFallbackKey(keyBytes);
+
+                if (op.type === 'put') {
+                    const valueBytes = new Uint8Array(op.value);
+                    return { type: 'put', key, value: this._wrapRawValue(valueBytes) };
+                }
+
+                return { type: 'delete', key };
+            });
+            await this._fallback.transaction(idbOps);
+            return true;
+        }
 
         await this._call('commitTransaction', { ops });
         return true;
@@ -362,10 +596,6 @@ export class SikioDB {
 
 
     async export() {
-        if (this._fallback) {
-            return this._fallback.export();
-        }
-
         const allData = {};
         const decoder = new TextDecoder();
         const prefix = new Uint8Array([0]);

@@ -33,6 +33,7 @@ macro_rules! console_log {
 }
 #[allow(unused_imports)]
 pub(crate) use console_log;
+#[cfg(not(test))]
 #[wasm_bindgen(start)]
 pub fn main() -> Result<(), JsValue> {
     #[cfg(feature = "console_error_panic_hook")]

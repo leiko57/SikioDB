@@ -61,6 +61,24 @@ export class IndexedDBFallback {
         });
     }
 
+    async transaction(ops) {
+        return new Promise((resolve, reject) => {
+            const tx = this.db.transaction(STORE_NAME, 'readwrite');
+            const store = tx.objectStore(STORE_NAME);
+
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => reject(tx.error);
+
+            for (const op of ops) {
+                if (op.type === 'put') {
+                    store.put(op.value, op.key);
+                } else if (op.type === 'delete') {
+                    store.delete(op.key);
+                }
+            }
+        });
+    }
+
     async getMany(keys) {
         return new Promise((resolve, reject) => {
             const tx = this.db.transaction(STORE_NAME, 'readonly');

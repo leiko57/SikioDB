@@ -238,9 +238,7 @@ fn process_stored_value(stored_value: &[u8], storage: &OPFSStorage) -> Result<Op
         return extract_value(&decompressed);
     }
 
-    let decompressed = decompress(stored_value)
-        .ok_or_else(|| SikioError::Corrupted("Failed to decompress value".into()))?;
-    extract_value(&decompressed)
+    extract_value(stored_value)
 }
 
 fn extract_value(data: &[u8]) -> Result<Option<Vec<u8>>> {

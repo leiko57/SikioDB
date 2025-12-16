@@ -3,7 +3,7 @@ use crate::cache::PageCache;
 use crate::compression::{compress, decompress};
 use crate::error::{Result, SikioError};
 use crate::page::{validate_key_value, OverflowPage, Page, OVERFLOW_THRESHOLD, PAGE_SIZE};
-use crate::range::{key_in_range, prefix_to_range, RangeBound};
+use crate::range::{prefix_to_range, RangeBound};
 use crate::storage::OPFSStorage;
 use crate::transaction::{ReadTransaction, TransactionOp, WriteTransaction};
 use crate::wal::{WalEntry, WalOperation, WalReader};
@@ -50,6 +50,25 @@ struct Metadata {
 }
 const METADATA_HEADER_SIZE: usize = 40;
 impl Metadata {
+    fn checksum_old(bytes: &[u8]) -> Option<u32> {
+        if bytes.len() < 36 {
+            return None;
+        }
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&bytes[0..32]);
+        hasher.update(&[0u8; 4]);
+        Some(hasher.finalize())
+    }
+    fn checksum_new(bytes: &[u8]) -> Option<u32> {
+        if bytes.len() < METADATA_HEADER_SIZE {
+            return None;
+        }
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&bytes[0..32]);
+        hasher.update(&[0u8; 4]);
+        hasher.update(&bytes[36..]);
+        Some(hasher.finalize())
+    }
     fn to_bytes(&self) -> [u8; PAGE_SIZE] {
         let mut bytes = [0u8; PAGE_SIZE];
         bytes[0..8].copy_from_slice(&METADATA_MAGIC.to_le_bytes());
@@ -64,8 +83,9 @@ impl Metadata {
             let offset = METADATA_HEADER_SIZE + i * 8;
             bytes[offset..offset + 8].copy_from_slice(&id.to_le_bytes());
         }
-        let checksum = crc32fast::hash(&bytes[0..36]);
-        bytes[32..36].copy_from_slice(&checksum.to_le_bytes());
+        if let Some(checksum) = Self::checksum_new(&bytes) {
+            bytes[32..36].copy_from_slice(&checksum.to_le_bytes());
+        }
         bytes
     }
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
@@ -77,15 +97,23 @@ impl Metadata {
             return None;
         }
         let stored_checksum = u32::from_le_bytes(bytes[32..36].try_into().ok()?);
-        let mut check_bytes = bytes[0..36].to_vec();
-        check_bytes[32..36].copy_from_slice(&[0u8; 4]);
-        let computed = crc32fast::hash(&check_bytes[0..36]);
-        if stored_checksum != computed {
+        let computed_old = Self::checksum_old(bytes)?;
+        let computed_new = Self::checksum_new(bytes)?;
+        if stored_checksum != computed_old && stored_checksum != computed_new {
             return None;
         }
         let root_page_id = u64::from_le_bytes(bytes[8..16].try_into().ok()?);
         let next_page_id = u64::from_le_bytes(bytes[16..24].try_into().ok()?);
         let wal_sequence = u64::from_le_bytes(bytes[24..32].try_into().ok()?);
+        if next_page_id < 2 {
+            return None;
+        }
+        if root_page_id != 0 && root_page_id < 2 {
+            return None;
+        }
+        if root_page_id != 0 && root_page_id >= next_page_id {
+            return None;
+        }
         let free_count = u32::from_le_bytes(bytes[36..40].try_into().ok()?) as usize;
         let max_ids = (PAGE_SIZE - METADATA_HEADER_SIZE) / 8;
         let ids_to_read = free_count.min(max_ids);
@@ -97,6 +125,9 @@ impl Metadata {
                 free_page_ids.push(id);
             }
         }
+        free_page_ids.sort_unstable();
+        free_page_ids.dedup();
+        free_page_ids.retain(|&id| id >= 2 && id < next_page_id && id != root_page_id);
         Some(Metadata {
             root_page_id,
             next_page_id,
@@ -252,7 +283,8 @@ impl SikioDB {
         for page_id in 2..count {
             match self.storage.read_page(page_id) {
                 Ok(bytes) => {
-                    if let Err(_) = Page::from_bytes(&bytes) {
+                    if Page::from_bytes(&bytes).is_err() && OverflowPage::from_bytes(&bytes).is_err()
+                    {
                         corrupted_pages.push(page_id);
                     }
                 }
@@ -331,18 +363,23 @@ impl SikioDB {
                     break;
                 }
 
-                let user_value = if value.is_empty() {
+                let stored_value = self
+                    .get_value_resolved(value)
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+                let user_value = if stored_value.is_empty() {
                     None
                 } else {
-                    match value[0] {
-                        VAL_TYPE_RAW => Some(value[1..].to_vec()),
+                    match stored_value[0] {
+                        VAL_TYPE_RAW => Some(stored_value[1..].to_vec()),
                         VAL_TYPE_TTL => {
-                            if value.len() >= 9 {
-                                let expiry =
-                                    u64::from_le_bytes(value[1..9].try_into().unwrap_or([0; 8]));
+                            if stored_value.len() >= 9 {
+                                let expiry = u64::from_le_bytes(
+                                    stored_value[1..9].try_into().unwrap_or([0; 8]),
+                                );
                                 let now = js_sys::Date::now() as u64;
                                 if now <= expiry {
-                                    Some(value[9..].to_vec())
+                                    Some(stored_value[9..].to_vec())
                                 } else {
                                     None
                                 }
@@ -350,10 +387,9 @@ impl SikioDB {
                                 None
                             }
                         }
-                        _ => None, // Unknown type or overflow marker (already resolved by cursor?)
+                        _ => None,
                     }
                 };
-
 
                 if let Some(val) = user_value {
                     let entry = js_sys::Object::new();
@@ -666,44 +702,39 @@ impl SikioDB {
         start: &RangeBound,
         end: &RangeBound,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        use crate::cursor::{cursor_first, cursor_next, cursor_seek, CursorState};
+
         let root_id = self.btree.root_page_id();
         let mut results = Vec::new();
-        self.collect_range(root_id, start, end, &mut results)?;
-        Ok(results)
-    }
-    fn collect_range(
-        &mut self,
-        page_id: u64,
-        start: &RangeBound,
-        end: &RangeBound,
-        results: &mut Vec<(Vec<u8>, Vec<u8>)>,
-    ) -> Result<()> {
-        let node = self.load_node(page_id)?;
-        if node.is_leaf {
-            for i in 0..node.keys.len() {
-                if key_in_range(&node.keys[i], start, end) {
-                    let value = self.get_value_resolved(&node.values[i])?;
-                    results.push((node.keys[i].clone(), value));
-                }
-            }
-        } else {
-            for i in 0..node.children.len() {
-                let should_descend = if i == 0 {
-                    match start.start_key() {
-                        None => true,
-                        Some(sk) => i < node.keys.len() && node.keys[i].as_slice() >= sk,
-                    }
-                } else if i == node.children.len() - 1 {
-                    true
-                } else {
-                    true
-                };
-                if should_descend {
-                    self.collect_range(node.children[i], start, end, results)?;
-                }
-            }
+        if root_id == 0 {
+            return Ok(results);
         }
-        Ok(())
+
+        let mut state = CursorState::new();
+
+        let started = match start.start_key() {
+            Some(sk) => cursor_seek(&mut state, sk, root_id, &self.storage, &mut self.cache)?,
+            None => cursor_first(&mut state, root_id, &self.storage, &mut self.cache)?,
+        };
+
+        if !started {
+            return Ok(results);
+        }
+
+        while state.valid() {
+            if let (Some(key), Some(value)) = (state.key(), state.value()) {
+                if !end.is_after(key) {
+                    break;
+                }
+                if start.is_before(key) {
+                    let resolved = self.get_value_resolved(value)?;
+                    results.push((key.to_vec(), resolved));
+                }
+            }
+            cursor_next(&mut state, &self.storage, &mut self.cache)?;
+        }
+
+        Ok(results)
     }
     fn get_value_resolved(&self, stored: &[u8]) -> Result<Vec<u8>> {
         if Self::is_overflow_marker(stored) {
@@ -713,7 +744,9 @@ impl SikioDB {
                     reason: "Invalid overflow marker".into(),
                 })?;
             let compressed_data = self.read_overflow_chain(start_page, total_len)?;
-            Ok(decompress(&compressed_data).unwrap_or(compressed_data))
+            decompress(&compressed_data).ok_or_else(|| {
+                SikioError::Corrupted("Failed to decompress overflow data".into())
+            })
         } else {
             Ok(stored.to_vec())
         }

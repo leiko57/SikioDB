@@ -1,6 +1,6 @@
 # SikioDB
 
-![NPM Version](https://img.shields.io/npm/v/sikiodb?style=flat-square&color=blue) ![License](https://img.shields.io/github/license/seiko1337/SikioDB?style=flat-square) ![Rust](https://img.shields.io/badge/built_with-Rust-orange?style=flat-square) ![WASM](https://img.shields.io/badge/target-WASM-purple?style=flat-square) ![Size](https://img.shields.io/bundlephobia/minzip/sikiodb?style=flat-square&label=minzipped)
+![NPM Version](https://img.shields.io/npm/v/sikiodb?style=flat-square&color=blue) ![License](https://img.shields.io/github/license/leiko57/SikioDB?style=flat-square) ![Rust](https://img.shields.io/badge/built_with-Rust-orange?style=flat-square) ![WASM](https://img.shields.io/badge/target-WASM-purple?style=flat-square) ![Size](https://img.shields.io/bundlephobia/minzip/sikiodb?style=flat-square&label=minzipped)
 
 A blazing-fast, local-first database for the web. Built with Rust, WebAssembly, and OPFS.
 
@@ -82,7 +82,7 @@ wasm-pack build --target web --release
 
 ## Contributing
 
-Found a bug or have a feature request? Open an [Issue](https://github.com/seiko1337/SikioDB/issues/new).
+Found a bug or have a feature request? Open an [Issue](https://github.com/leiko57/SikioDB/issues/new).
 PRs are welcome!
 
 ## License

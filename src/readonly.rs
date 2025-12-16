@@ -5,6 +5,12 @@ use crate::cursor::{cursor_next, cursor_seek, CursorState};
 use crate::error::{Result, SikioError};
 use crate::page::Page;
 use crate::storage::OPFSStorage;
+use crate::page::{OverflowPage, OVERFLOW_DATA_SIZE};
+
+const VAL_TYPE_RAW: u8 = 0x00;
+const VAL_TYPE_TTL: u8 = 0x01;
+const OVERFLOW_MARKER_PREFIX: u8 = 0xFF;
+const OVERFLOW_MARKER_SIZE: usize = 13;
 pub struct ReadOnlyDatabase {
     storage: OPFSStorage,
     cache: PageCache,
@@ -86,13 +92,63 @@ impl ReadOnlyDatabase {
         if stored_value.is_empty() {
             return Ok(None);
         }
-        let decompressed = decompress(stored_value)
-            .ok_or_else(|| SikioError::Corrupted("Failed to decompress".into()))?;
-        if decompressed.is_empty() {
-            return Ok(None);
+
+        if stored_value[0] == OVERFLOW_MARKER_PREFIX && stored_value.len() >= OVERFLOW_MARKER_SIZE {
+            let first_page_id = u64::from_le_bytes(
+                stored_value[1..9]
+                    .try_into()
+                    .map_err(|_| SikioError::Corrupted("Invalid overflow marker".into()))?,
+            );
+            let total_len = u32::from_le_bytes(
+                stored_value[9..13]
+                    .try_into()
+                    .map_err(|_| SikioError::Corrupted("Invalid overflow length".into()))?,
+            ) as usize;
+
+            let data = read_overflow_chain(first_page_id, total_len, &self.storage)?;
+            let wrapped = decompress(&data)
+                .ok_or_else(|| SikioError::Corrupted("Failed to decompress overflow data".into()))?;
+            return self.process_value(&wrapped);
         }
-        Ok(Some(decompressed[1..].to_vec()))
+
+        match stored_value[0] {
+            VAL_TYPE_RAW => Ok(Some(stored_value[1..].to_vec())),
+            VAL_TYPE_TTL => {
+                if stored_value.len() < 9 {
+                    return Ok(None);
+                }
+                let expiry = u64::from_le_bytes(
+                    stored_value[1..9]
+                        .try_into()
+                        .map_err(|_| SikioError::Corrupted("Invalid TTL expiry".into()))?,
+                );
+                let now = js_sys::Date::now() as u64;
+                if now > expiry {
+                    Ok(None)
+                } else {
+                    Ok(Some(stored_value[9..].to_vec()))
+                }
+            }
+            _ => Ok(Some(stored_value[1..].to_vec())),
+        }
     }
+}
+
+fn read_overflow_chain(first_page_id: u64, total_len: usize, storage: &OPFSStorage) -> Result<Vec<u8>> {
+    if total_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut data = Vec::with_capacity(total_len.min(OVERFLOW_DATA_SIZE));
+    let mut current_page = first_page_id;
+    while current_page != 0 && data.len() < total_len {
+        let bytes = storage.read_page(current_page)?;
+        let overflow = OverflowPage::from_bytes(&bytes)?;
+        data.extend_from_slice(&overflow.data);
+        current_page = overflow.next_page;
+    }
+    data.truncate(total_len);
+    Ok(data)
 }
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AccessMode {

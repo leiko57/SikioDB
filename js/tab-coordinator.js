@@ -2,6 +2,7 @@ const LOCK_NAME = 'sikiodb-leader';
 const CHANNEL_NAME = 'sikiodb-sync';
 const HEARTBEAT_INTERVAL = 1000;
 const LEADER_TIMEOUT = 3000;
+const ELECTION_WINDOW_MS = 100;
 
 export class TabCoordinator {
     constructor(dbName) {
@@ -15,6 +16,13 @@ export class TabCoordinator {
         this.onBecomeLeader = null;
         this.onBecomeFollower = null;
         this.lockController = null;
+        this._lockless = false;
+        this._candidates = new Map();
+        this._followerMonitorTimer = null;
+        this._electionToken = 0;
+        this._electionStartedAt = 0;
+        this._observedLeaderTabId = null;
+        this._observedLeaderAt = 0;
     }
 
     async initialize() {
@@ -22,12 +30,16 @@ export class TabCoordinator {
         this.channel.onmessage = (e) => this._handleMessage(e.data);
 
         if (!navigator.locks) {
-            console.warn('Web Locks API not available, falling back to leader mode');
-            await this._becomeLeader();
+            this._lockless = true;
+            await this._startLocklessElection();
             return;
         }
 
-        this._tryAcquireLock();
+        await this._tryAcquireLock();
+    }
+
+    _sleep(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
     async _tryAcquireLock() {
@@ -53,6 +65,56 @@ export class TabCoordinator {
         if (!this.isLeader) {
             this._becomeFollower();
             this._waitForLeadership();
+        }
+    }
+
+    async _startLocklessElection() {
+        const selfId = this._getTabId();
+        const electionToken = ++this._electionToken;
+        const electionStart = Date.now();
+        this._electionStartedAt = electionStart;
+        this._observedLeaderTabId = null;
+        this._observedLeaderAt = 0;
+
+        this._candidates.clear();
+        this._candidates.set(selfId, electionStart);
+
+        this.channel.postMessage({
+            type: 'candidate',
+            tabId: selfId,
+            timestamp: electionStart
+        });
+
+        this.channel.postMessage({
+            type: 'leader-query',
+            tabId: selfId,
+            timestamp: electionStart
+        });
+
+        await this._sleep(ELECTION_WINDOW_MS);
+
+        if (electionToken !== this._electionToken) {
+            return;
+        }
+
+        if (this._observedLeaderTabId && this._observedLeaderAt >= electionStart) {
+            this._becomeFollower();
+            this._startFollowerMonitor();
+            return;
+        }
+
+        let leaderId = null;
+        for (const tabId of this._candidates.keys()) {
+            if (leaderId === null || tabId < leaderId) {
+                leaderId = tabId;
+            }
+        }
+
+        if (leaderId === selfId) {
+            await this._becomeLeader();
+        } else {
+            this._becomeFollower();
+            this._startFollowerMonitor();
         }
     }
 
@@ -86,6 +148,7 @@ export class TabCoordinator {
     _becomeFollower() {
         this.isLeader = false;
         this._stopHeartbeat();
+        this._stopFollowerMonitor();
         this.lastLeaderHeartbeat = Date.now();
 
         if (this.onBecomeFollower) {
@@ -111,12 +174,49 @@ export class TabCoordinator {
         }
     }
 
+    _startFollowerMonitor() {
+        if (!this._lockless) return;
+        this._stopFollowerMonitor();
+        this._followerMonitorTimer = setInterval(() => {
+            if (this.isLeader) return;
+            const elapsed = Date.now() - this.lastLeaderHeartbeat;
+            if (elapsed > LEADER_TIMEOUT) {
+                this._startLocklessElection();
+            }
+        }, HEARTBEAT_INTERVAL);
+    }
+
+    _stopFollowerMonitor() {
+        if (this._followerMonitorTimer) {
+            clearInterval(this._followerMonitorTimer);
+            this._followerMonitorTimer = null;
+        }
+    }
+
     _handleMessage(data) {
         switch (data.type) {
             case 'heartbeat':
             case 'leader-announce':
                 if (!this.isLeader) {
                     this.lastLeaderHeartbeat = Date.now();
+                    if (this._lockless && data.tabId && data.tabId !== this._getTabId()) {
+                        this._observedLeaderTabId = data.tabId;
+                        this._observedLeaderAt = this.lastLeaderHeartbeat;
+                    }
+                }
+                break;
+            case 'leader-query':
+                if (this.isLeader) {
+                    this.channel.postMessage({
+                        type: 'leader-announce',
+                        tabId: this._getTabId(),
+                        timestamp: Date.now()
+                    });
+                }
+                break;
+            case 'candidate':
+                if (this._lockless && data.tabId) {
+                    this._candidates.set(data.tabId, data.timestamp || Date.now());
                 }
                 break;
 
@@ -204,6 +304,7 @@ export class TabCoordinator {
 
     destroy() {
         this._stopHeartbeat();
+        this._stopFollowerMonitor();
         if (this._releaseLock) {
             this._releaseLock();
             this._releaseLock = null;

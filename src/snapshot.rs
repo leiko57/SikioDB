@@ -104,9 +104,7 @@ impl ReadSnapshot {
             })?;
             return self.extract_value(&decompressed);
         }
-        let decompressed = decompress(stored_value)
-            .ok_or_else(|| SikioError::Corrupted("Failed to decompress value".into()))?;
-        self.extract_value(&decompressed)
+        self.extract_value(stored_value)
     }
     fn extract_value(&self, data: &[u8]) -> Result<Option<Vec<u8>>> {
         if data.is_empty() {

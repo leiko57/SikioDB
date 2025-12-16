@@ -1,11 +1,11 @@
 [package]
 name = "sikiodb"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
-authors = ["seiko1337"]
+authors = ["leiko57"]
 description = "A blazing-fast, local-first database for the web. Up to 2.5x - 3x faster than IndexedDB. Built with Rust, WebAssembly, and OPFS."
 license = "AGPL-3.0-only"
-repository = "https://github.com/seiko1337/SikioDB"
+repository = "https://github.com/leiko57/SikioDB"
 keywords = ["database", "wasm", "opfs", "key-value", "storage"]
 categories = ["database", "wasm"]
 
